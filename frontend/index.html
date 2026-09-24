@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mestre do Jogo IA</title>
+    <link rel="stylesheet" href="style.css">
+
+    <!-- Marked.js: traduz o Markdown da IA para HTML -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <!-- DOMPurify: limpa o HTML gerado (segurança contra XSS) -->
+    <script src="https://cdn.jsdelivr.net/npm/dompurify/dist/purify.min.js"></script>
+    <!-- canvas-confetti: confetes quando o jogador acerta -->
+    <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.9.3/dist/confetti.browser.min.js"></script>
+</head>
+<body>
+
+    <div class="chat-container">
+        <div class="chat-header">
+            <div>
+                <h3>🎲 Mestre do Jogo</h3>
+                <small id="jogadorAtual" class="jogador-atual"></small>
+            </div>
+            <div class="header-botoes">
+                <button id="btnRanking" onclick="abrirRanking()">🏆 Ranking</button>
+                <button id="btnLimpar" onclick="limparConversa()">🗑️ Limpar</button>
+                <button id="btnDownload" onclick="baixarPDF()">📥 PDF</button>
+                <button id="btnSair" onclick="sair()">🚪 Sair</button>
+            </div>
+        </div>
+
+        <div id="chat-box" class="chat-box">
+            <!-- Mensagens aparecem aqui -->
+        </div>
+
+        <!-- Preview da imagem selecionada -->
+        <div id="previewArea" class="preview-area escondido">
+            <img id="previewImagem" alt="Pré-visualização da imagem">
+            <span id="previewNome"></span>
+            <button class="btn-remover" onclick="removerImagem()" title="Remover imagem">✕</button>
+        </div>
+
+        <div class="input-area">
+            <input type="file" id="imagemUpload" accept="image/jpeg,image/png,image/webp" class="escondido" onchange="selecionarImagem(event)">
+            <button id="btnAnexar" class="btn-anexar" onclick="document.getElementById('imagemUpload').click()" title="Anexar imagem">📎</button>
+            <input type="text" id="userInput" placeholder="Digite sua resposta ou pergunte sobre uma imagem..." onkeydown="verificarTecla(event)">
+            <button id="btnEnviar" onclick="enviar()">Enviar</button>
+        </div>
+
+        <!-- Tela de Login / Cadastro -->
+        <div id="telaAuth" class="overlay">
+            <div class="cartao">
+                <h2>🔐 Cofre do Conhecimento</h2>
+
+                <div class="abas">
+                    <button id="abaLogin" class="aba ativa" onclick="trocarAba('login')">Entrar</button>
+                    <button id="abaCadastro" class="aba" onclick="trocarAba('cadastro')">Criar conta</button>
+                </div>
+
+                <form id="formAuth" onsubmit="enviarAuth(event)">
+                    <input type="text" id="authNome" class="escondido" maxlength="20" placeholder="Seu nome no jogo" autocomplete="nickname">
+                    <input type="email" id="authEmail" placeholder="E-mail" autocomplete="email" required>
+                    <input type="password" id="authSenha" placeholder="Senha (mín. 6 caracteres)" autocomplete="current-password" required>
+                    <small id="authMensagem" class="erro"></small>
+                    <button type="submit" id="btnAuth">Entrar</button>
+                </form>
+            </div>
+        </div>
+
+        <!-- Painel do Ranking -->
+        <div id="telaRanking" class="overlay escondido">
+            <div class="cartao cartao-ranking">
+                <div class="ranking-topo">
+                    <h2>🏆 Hall da Fama</h2>
+                    <button class="btn-fechar" onclick="fecharRanking()">✕</button>
+                </div>
+                <div id="conteudoRanking"></div>
+                <button onclick="abrirRanking()">🔄 Atualizar</button>
+            </div>
+        </div>
+
+        <!-- Aviso de XP (+50 XP / -10 XP) -->
+        <div id="avisoXP" class="aviso-xp"></div>
+    </div>
+
+    <script>
+        // ====== CONFIGURAÇÃO ======
+        // Local: usa o localhost. Na Vercel: troque pela URL do seu back-end no Render.
+        const API_RENDER = 'https://SEU-APP.onrender.com';
+        const ehLocal = ['localhost', '127.0.0.1', ''].includes(location.hostname);
+        const API_URL = ehLocal ? 'http://localhost:3000' : API_RENDER;
+
+        const CHAVE_TOKEN = 'token_saas';
+        const MENSAGEM_INICIAL = 'Olá, aventureiro! Sou o **Guardião do Cofre do Conhecimento**. 🔐\n\n' +
+            'Digite **"quero jogar"** e eu te passo a primeira charada!';
+
+        const TAMANHO_MAXIMO_MB = 5;
+        const TIPOS_IMAGEM = ['image/jpeg', 'image/png', 'image/webp'];
+
+        let conversaCompleta = ''; // Armazena o texto para o PDF
+        let imagemSelecionada = null; // Arquivo escolhido no 📎
+        let nomeUsuario = '';
+        let modoAuth = 'login';
+
+        // ====== TOKEN (o "Crachá") ======
+        function lerToken() {
+            try { return localStorage.getItem(CHAVE_TOKEN); } catch { return null; }
+        }
+
+        function salvarToken(token) {
+            try { localStorage.setItem(CHAVE_TOKEN, token); } catch { /* sem storage */ }
+        }
+
+        function apagarToken() {
+            try { localStorage.removeItem(CHAVE_TOKEN); } catch { /* sem storage */ }
+        }
+
+        /**
+         * fetch que já envia o crachá no header Authorization.
+         * Se o servidor responder 401, a sessão acabou: volta para o login.
+         */
+        async function apiFetch(caminho, opcoes = {}) {
+            // Com FormData o navegador monta o Content-Type (multipart) sozinho
+            const ehArquivo = opcoes.body instanceof FormData;
+            const headers = {
+                ...(ehArquivo ? {} : { 'Content-Type': 'application/json' }),
+                'Authorization': `Bearer ${lerToken()}`,
+                ...(opcoes.headers || {})
+            };
+            const response = await fetch(`${API_URL}${caminho}`, { ...opcoes, headers });
+
+            if (response.status === 401) {
+                sair('Sua sessão expirou. Faça login novamente.');
+                throw new Error('Não autorizado');
+            }
+            return response;
+        }
+
+        // ====== LOGIN / CADASTRO ======
+        function trocarAba(modo) {
+            modoAuth = modo;
+            const cadastro = modo === 'cadastro';
+            document.getElementById('abaLogin').classList.toggle('ativa', !cadastro);
+            document.getElementById('abaCadastro').classList.toggle('ativa', cadastro);
+            document.getElementById('authNome').classList.toggle('escondido', !cadastro);
+            document.getElementById('authNome').required = cadastro;
+            document.getElementById('authSenha').autocomplete = cadastro ? 'new-password' : 'current-password';
+            document.getElementById('btnAuth').innerText = cadastro ? 'Criar conta' : 'Entrar';
+            mostrarMensagemAuth('');
+        }
+
+        function mostrarMensagemAuth(texto, sucesso = false) {
+            const msg = document.getElementById('authMensagem');
+            msg.innerText = texto;
+            msg.className = sucesso ? 'sucesso' : 'erro';
+        }
+
+        async function enviarAuth(evento) {
+            evento.preventDefault();
+
+            const nome = document.getElementById('authNome').value.trim();
+            const email = document.getElementById('authEmail').value.trim();
+            const senha = document.getElementById('authSenha').value;
+            const btn = document.getElementById('btnAuth');
+
+            btn.disabled = true;
+            mostrarMensagemAuth('⏳ Aguarde...', true);
+
+            try {
+                const rota = modoAuth === 'cadastro' ? '/api/auth/register' : '/api/auth/login';
+                const corpo = modoAuth === 'cadastro' ? { nome, email, senha } : { email, senha };
+
+                const response = await fetch(`${API_URL}${rota}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(corpo)
+                });
+                const dados = await response.json();
+                if (!response.ok) throw new Error(dados.erro || 'Erro no servidor');
+
+                if (modoAuth === 'cadastro') {
+                    // Cadastro ok: já faz o login automaticamente
+                    modoAuth = 'login';
+                    return enviarAuth(evento);
+                }
+
+                salvarToken(dados.token); // Guardando o crachá
+                entrarNoJogo(dados.nome);
+            } catch (e) {
+                mostrarMensagemAuth(e.message === 'Failed to fetch'
+                    ? '⚠️ Não foi possível conectar ao servidor.'
+                    : e.message);
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
+        function entrarNoJogo(nome) {
+            nomeUsuario = nome;
+            document.getElementById('jogadorAtual').innerText = `Jogando como ${nome}`;
+            document.getElementById('telaAuth').classList.add('escondido');
+            document.getElementById('formAuth').reset();
+            trocarAba('login');
+            alternarEnvio(true);
+            carregarHistorico();
+        }
+
+        // Histórico Rico: redesenha a conversa (com imagens do Cloudinary) após o F5
+        async function carregarHistorico() {
+            try {
+                const response = await apiFetch('/api/chat/historico');
+                const mensagens = await response.json();
+                if (!response.ok || mensagens.length === 0) return;
+
+                document.getElementById('chat-box').innerHTML = '';
+                conversaCompleta = '';
+                mensagens.forEach((m) => {
+                    if (m.role === 'user') {
+                        exibirMensagemUsuario(m.texto, m.imagemUrl);
+                        conversaCompleta += `${nomeUsuario}: ${m.imagemUrl ? '[imagem] ' : ''}${m.texto}\n`;
+                    } else {
+                        exibirMensagem(m.texto, 'ai');
+                        conversaCompleta += `Mestre: ${m.texto}\n\n`;
+                    }
+                });
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        // Desafio Hacker: Logout
+        function sair(mensagem) {
+            apagarToken();
+            removerImagem();
+            nomeUsuario = '';
+            conversaCompleta = '';
+            document.getElementById('jogadorAtual').innerText = '';
+            document.getElementById('chat-box').innerHTML = '';
+            exibirMensagem(MENSAGEM_INICIAL, 'ai');
+            fecharRanking();
+            document.getElementById('telaAuth').classList.remove('escondido');
+            alternarEnvio(false);
+            if (typeof mensagem === 'string') mostrarMensagemAuth(mensagem);
+        }
+
+        // Desafio Hacker: Persistência de Login (F5)
+        async function verificarSessao() {
+            if (!lerToken()) return;
+            try {
+                const response = await apiFetch('/api/auth/perfil');
+                const dados = await response.json();
+                if (response.ok) entrarNoJogo(dados.nome);
+            } catch (e) {
+                console.error(e); // 401 já volta para o login
+            }
+        }
+
+        // ====== IMAGEM (📎) ======
+        function selecionarImagem(evento) {
+            const arquivo = evento.target.files[0];
+            if (!arquivo) return;
+
+            // Validação rápida no Front (o Back-end também valida e devolve 400)
+            if (!TIPOS_IMAGEM.includes(arquivo.type)) {
+                alert('Formato não suportado. Envie uma imagem JPG, PNG ou WEBP.');
+                return removerImagem();
+            }
+            if (arquivo.size > TAMANHO_MAXIMO_MB * 1024 * 1024) {
+                alert(`Imagem muito grande. O limite é ${TAMANHO_MAXIMO_MB} MB.`);
+                return removerImagem();
+            }
+
+            imagemSelecionada = arquivo;
+            const preview = document.getElementById('previewImagem');
+            if (preview.src) URL.revokeObjectURL(preview.src);
+            preview.src = URL.createObjectURL(arquivo);
+            document.getElementById('previewNome').innerText = arquivo.name;
+            document.getElementById('previewArea').classList.remove('escondido');
+            document.getElementById('userInput').focus();
+        }
+
+        function removerImagem() {
+            imagemSelecionada = null;
+            document.getElementById('imagemUpload').value = '';
+            document.getElementById('previewArea').classList.add('escondido');
+        }
+
+        // ====== CHAT ======
+        async function enviar() {
+            if (!nomeUsuario) return;
+
+            const input = document.getElementById('userInput');
+            const texto = input.value.trim();
+            const imagem = imagemSelecionada;
+            if (!texto && !imagem) return;
+
+            // Mostra o balão na hora (com a miniatura local, se tiver imagem)
+            const balao = exibirMensagemUsuario(texto, imagem ? URL.createObjectURL(imagem) : null);
+            input.value = '';
+            removerImagem();
+
+            const carregando = exibirMensagem(imagem ? '👁️ Analisando a imagem...' : 'Pensando...', 'ai carregando');
+            alternarEnvio(false);
+
+            try {
+                let response;
+                if (imagem) {
+                    // Arquivo + texto juntos: FormData (JSON.stringify não envia arquivos)
+                    const formData = new FormData();
+                    formData.append('imagem', imagem);
+                    formData.append('prompt', texto);
+                    response = await apiFetch('/api/chat/vision', { method: 'POST', body: formData });
+                } else {
+                    response = await apiFetch('/api/chat', {
+                        method: 'POST',
+                        body: JSON.stringify({ pergunta: texto }) // o nome vem do Token, não daqui
+                    });
+                }
+
+                const dados = await response.json();
+                carregando.remove();
+                if (!response.ok) throw new Error(dados.erro || 'Erro no servidor');
+
+                // Troca a miniatura local pela URL permanente do Cloudinary
+                if (dados.imagemUrl) {
+                    const img = balao.querySelector('img');
+                    if (img) {
+                        URL.revokeObjectURL(img.src);
+                        img.src = dados.imagemUrl;
+                        img.parentElement.href = dados.imagemUrl;
+                    }
+                    if (!texto) balao.querySelector('.legenda').innerText = dados.prompt;
+                }
+
+                conversaCompleta += `${nomeUsuario}: ${imagem ? '[imagem] ' : ''}${texto || dados.prompt || ''}\n`;
+                exibirMensagem(dados.resposta, 'ai');
+                conversaCompleta += `Mestre: ${dados.resposta}\n\n`;
+
+                if (dados.xpGanho) mostrarAvisoXP(dados.xpGanho);
+                if (dados.xpGanho > 0 || /parab[ée]ns|acertou/i.test(dados.resposta)) soltarConfete();
+            } catch (e) {
+                carregando.remove();
+                if (nomeUsuario) {
+                    const amigavel = e.message && e.message !== 'Failed to fetch' && e.message !== 'Não autorizado';
+                    exibirMensagem(amigavel ? `⚠️ ${e.message}` : '⚠️ Erro ao conectar com o servidor.', 'ai');
+                }
+                console.error(e);
+            } finally {
+                alternarEnvio(true);
+            }
+        }
+
+        // Balão do usuário: texto e/ou imagem
+        function exibirMensagemUsuario(texto, imagemUrl) {
+            const chatBox = document.getElementById('chat-box');
+            const div = document.createElement('div');
+            div.className = 'msg user';
+
+            if (imagemUrl) {
+                const link = document.createElement('a');
+                link.href = imagemUrl;
+                link.target = '_blank';
+                link.rel = 'noopener';
+                const img = document.createElement('img');
+                img.src = imagemUrl;
+                img.alt = 'Imagem enviada';
+                img.className = 'imagem-chat';
+                img.onload = () => { chatBox.scrollTop = chatBox.scrollHeight; };
+                link.appendChild(img);
+                div.appendChild(link);
+            }
+
+            const legenda = document.createElement('div');
+            legenda.className = 'legenda';
+            legenda.innerText = texto || '';
+            div.appendChild(legenda);
+
+            chatBox.appendChild(div);
+            chatBox.scrollTop = chatBox.scrollHeight;
+            return div;
+        }
+
+        function exibirMensagem(texto, tipo) {
+            const chatBox = document.getElementById('chat-box');
+            const div = document.createElement('div');
+            div.className = `msg ${tipo}`;
+
+            if (tipo === 'ai') {
+                // Markdown -> HTML (limpo pelo DOMPurify)
+                div.innerHTML = DOMPurify.sanitize(marked.parse(texto));
+            } else {
+                div.innerText = texto;
+            }
+
+            chatBox.appendChild(div);
+            chatBox.scrollTop = chatBox.scrollHeight;
+            return div;
+        }
+
+        function alternarEnvio(ativo) {
+            const podeEnviar = ativo && !!nomeUsuario;
+            document.getElementById('btnEnviar').disabled = !podeEnviar;
+            document.getElementById('userInput').disabled = !podeEnviar;
+            document.getElementById('btnAnexar').disabled = !podeEnviar;
+            if (podeEnviar) document.getElementById('userInput').focus();
+        }
+
+        function verificarTecla(e) {
+            if (e.key === 'Enter') enviar();
+        }
+
+        // ====== XP E CONFETES ======
+        function mostrarAvisoXP(xp) {
+            const aviso = document.getElementById('avisoXP');
+            aviso.innerText = xp > 0 ? `+${xp} XP ⭐` : `${xp} XP 💔`;
+            aviso.className = `aviso-xp visivel ${xp > 0 ? 'ganhou' : 'perdeu'}`;
+            setTimeout(() => { aviso.className = 'aviso-xp'; }, 2500);
+        }
+
+        function soltarConfete() {
+            if (typeof confetti !== 'function') return;
+            confetti({ particleCount: 150, spread: 80, origin: { y: 0.6 } });
+        }
+
+        // ====== RANKING (Hall da Fama) ======
+        async function abrirRanking() {
+            if (!nomeUsuario) return;
+
+            const painel = document.getElementById('telaRanking');
+            const conteudo = document.getElementById('conteudoRanking');
+            painel.classList.remove('escondido');
+            conteudo.innerHTML = '<p class="vazio">⏳ Carregando...</p>';
+
+            try {
+                const response = await apiFetch('/api/ranking');
+                const ranking = await response.json();
+                if (!response.ok) throw new Error(ranking.erro);
+
+                desenharRanking(ranking);
+            } catch (e) {
+                conteudo.innerHTML = '<p class="vazio">⚠️ Não foi possível carregar o ranking.</p>';
+                console.error(e);
+            }
+        }
+
+        function desenharRanking(ranking) {
+            const conteudo = document.getElementById('conteudoRanking');
+
+            if (ranking.length === 0) {
+                conteudo.innerHTML = '<p class="vazio">Ninguém pontuou ainda. Seja o primeiro! 🚀</p>';
+                return;
+            }
+
+            const medalhas = { 1: '🥇', 2: '🥈', 3: '🥉' };
+            const tabela = document.createElement('table');
+            tabela.className = 'tabela-ranking';
+            tabela.innerHTML = '<thead><tr><th>#</th><th>Jogador</th><th>XP</th></tr></thead>';
+
+            const corpo = document.createElement('tbody');
+            ranking.forEach((j) => {
+                const linha = document.createElement('tr');
+                if (j.voce) linha.classList.add('eu');
+
+                const tdPos = document.createElement('td');
+                tdPos.className = 'posicao';
+                tdPos.innerText = medalhas[j.posicao] || `${j.posicao}º`;
+
+                const tdNome = document.createElement('td');
+                const titulo = document.createElement('span');
+                titulo.className = `titulo titulo-${j.titulo.toLowerCase()}`;
+                titulo.innerText = j.titulo;
+                const nome = document.createElement('span');
+                nome.innerText = ` ${j.nome}${j.voce ? ' (você)' : ''}`; // innerText evita injeção de HTML
+                tdNome.append(titulo, nome);
+
+                const tdXp = document.createElement('td');
+                tdXp.className = 'xp';
+                tdXp.innerText = j.xp;
+
+                linha.append(tdPos, tdNome, tdXp);
+                corpo.appendChild(linha);
+            });
+
+            tabela.appendChild(corpo);
+            conteudo.innerHTML = '';
+            conteudo.appendChild(tabela);
+        }
+
+        function fecharRanking() {
+            document.getElementById('telaRanking').classList.add('escondido');
+        }
+
+        // ====== LIMPAR CONVERSA (o XP continua!) ======
+        async function limparConversa() {
+            if (!nomeUsuario) return;
+            if (!confirm('Apagar a conversa e a memória da IA? Seu XP continua salvo.')) return;
+
+            const btn = document.getElementById('btnLimpar');
+            btn.disabled = true;
+
+            try {
+                const response = await apiFetch('/api/chat/limpar', { method: 'DELETE' });
+                const dados = await response.json();
+                if (!response.ok) throw new Error(dados.erro);
+
+                document.getElementById('chat-box').innerHTML = '';
+                conversaCompleta = '';
+                exibirMensagem(MENSAGEM_INICIAL, 'ai');
+            } catch (e) {
+                if (nomeUsuario) alert('Não foi possível limpar o histórico.');
+                console.error(e);
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
+        // ====== PDF ======
+        async function baixarPDF() {
+            if (!conversaCompleta) return alert('Inicie uma conversa primeiro!');
+
+            const btn = document.getElementById('btnDownload');
+            btn.innerText = '⏳...';
+
+            try {
+                const response = await apiFetch('/api/pdf', {
+                    method: 'POST',
+                    body: JSON.stringify({ historico: conversaCompleta })
+                });
+                if (!response.ok) throw new Error('Erro ao gerar PDF');
+
+                const blob = await response.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'resumo_conversa.pdf';
+                a.click();
+                URL.revokeObjectURL(url);
+            } catch (e) {
+                if (nomeUsuario) alert('Não foi possível gerar o PDF.');
+                console.error(e);
+            } finally {
+                btn.innerText = '📥 PDF';
+            }
+        }
+
+        // ====== INÍCIO ======
+        exibirMensagem(MENSAGEM_INICIAL, 'ai');
+        alternarEnvio(false);
+        verificarSessao();
+    </script>
+</body>
+</html>
